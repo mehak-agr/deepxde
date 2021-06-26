@@ -13,8 +13,8 @@ import numpy as np
 import deepxde as dde
 from deepxde.backend import tf
 
-A = 2
-C = 10
+c = 10
+A = np.pi ** 2
 
 
 def get_initial_loss(model):
@@ -25,30 +25,37 @@ def get_initial_loss(model):
 
 def main():
     def pde(x, y):
-        # dy_tt = dde.grad.hessian(y, x, i=2, j=2)
-        dy_tt = dde.grad.hessian(y, x, i=1, j=1)
-        dy_xx = dde.grad.hessian(y, x, i=0, j=0)
-        print(dy_xx)
-        return dy_tt - C ** 2 * dy_xx_1 - C ** 2 * dy_xx_0
+        dy_tt = dde.grad.hessian(y, x, i=2, j=2)
+        dy_x2x2 = dde.grad.hessian(y, x, i=1, j=1)
+        dy_x1x1 = dde.grad.hessian(y, x, i=0, j=0)
+        return dy_tt - c ** 2 * (2 * A) * (dy_x1x1 + dy_x2x2)
 
-    def func_bc(x):
-        return 0
+    def func(x):
+        x1, x2, t = x[:, 0:1], x[:, 1:2], x[:, 2:]
+        p1 = np.sin(np.pi * x1) * np.sin(np.pi * x2)
+        p2 = A * (np.cos(c * np.pi * np.sqrt(2) * t) + np.sin(c * np.pi * np.sqrt(2) * t))
+        return p1 * p2
     
-    def func_ic_1(x):
-        return np.sqrt((x[:, 0:1] - 0.5) ** 2 + (x[:, 1:2] - 0.5) ** 2)
-    
-    def func_ic_2(x, y, _):
+    def dfunc_t(x, y, _):
         dy_t = dde.grad.jacobian(y, x, i=0, j=2)
-        return dy_t
+        x1, x2, t = x[:, 0:1], x[:, 1:2], x[:, 2:]
+        p1 = tf.sin(np.pi * x1) * tf.sin(np.pi * x2)
+        p2 = A * (tf.cos(c * np.pi * np.sqrt(2) * t) + tf.sin(c * np.pi * np.sqrt(2) * t))
+        dp2_t = c * np.pi * np.sqrt(2) * p2
+        return dy_t - p1 * dp2_t
 
-    geom = dde.geometry.Rectangle([0, 0], [1, 1])
+    geom = dde.geometry.Rectangle([-1, -1], [1, 1])
     timedomain = dde.geometry.TimeDomain(0, 1)
     geomtime = dde.geometry.GeometryXTime(geom, timedomain)
 
-    bc = dde.DirichletBC(geomtime, func_bc, lambda _, on_boundary: on_boundary)
-    ic_1 = dde.IC(geomtime, func_ic_1, lambda _, on_initial: on_initial)
+    bc = dde.DirichletBC(geomtime,
+                         func,
+                         lambda _, on_boundary: on_boundary)
+    ic_1 = dde.IC(geomtime,
+                  func,
+                  lambda x, _: np.isclose(x[2], 0))
     ic_2 = dde.OperatorBC(geomtime,
-                          func_ic_2,
+                          dfunc_t,
                           lambda x, _: np.isclose(x[2], 0))
 
     data = dde.data.TimePDE(
@@ -58,16 +65,17 @@ def main():
         num_domain=360,
         num_boundary=360,
         num_initial=360,
+        solution=func,
         num_test=10000,
     )
 
-    layer_size = [2] + [100] * 3 + [1]
+    layer_size = [3] + [100] * 3 + [1]
     activation = "tanh"
     initializer = "Glorot uniform"
     net = dde.maps.STMsFFN(
         layer_size, activation, initializer, sigmas_x=[1, 1], sigmas_t=[1, 10]
     )
-    net.apply_feature_transform(lambda x: (x[:, 0:1] - 0.5) * 2 * np.sqrt(3) + (x[:, 1:2] - 0.5) * 2 * np.sqrt(3))
+    net.apply_feature_transform(lambda x: x * 2 * np.sqrt(2))
 
     model = dde.Model(data, net)
     initial_losses = get_initial_loss(model)
@@ -90,4 +98,7 @@ def main():
 if __name__ == "__main__":
     main()
 
-
+X = geomtime.random_points(10000)
+y_true = func(X)
+y_pred = model.predict(X)
+print("L2 relative error:", dde.metrics.l2_relative_error(y_true, y_pred))
